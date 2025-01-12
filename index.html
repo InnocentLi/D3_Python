@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>D3.js ER Diagram with PK Example</title>
+  <script src="https://d3js.org/d3.v6.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: sans-serif;
+      background: #f9f9f9;
+    }
+    svg {
+      width: 100vw;
+      height: 100vh;
+    }
+
+    /* 连线样式 */
+    .link {
+      stroke: #555;
+      stroke-width: 2;
+    }
+
+    /* 实体：模拟数据库表 */
+    .table {
+      fill: #4da6ff;
+      stroke: #004080;
+      stroke-width: 2;
+      rx: 5; /* 圆角矩形 */
+      ry: 5;
+    }
+    /* 表头背景 */
+    .table-header {
+      fill: #004080;
+      stroke: none;
+    }
+    /* 表头文字 */
+    .table-header-text {
+      fill: #ffffff;
+      font-size: 14px;
+      font-weight: bold;
+      pointer-events: none;
+    }
+    /* 字段文字 */
+    .table-field-text {
+      fill: #000000;
+      font-size: 13px;
+      pointer-events: none;
+    }
+
+    /* 关系：菱形 */
+    .relationship {
+      fill: #ffd966;
+      stroke: #995c00;
+      stroke-width: 2;
+    }
+
+    /* 拖拽时，鼠标样式 */
+    .node:hover {
+      cursor: move;
+    }
+  </style>
+</head>
+<body>
+<svg></svg>
+<script>
+  // =================== 1. 定义模拟的数据库 ER 数据 ===================
+  // 数据库表使用“类似实体+属性”的概念，但是会重点标识 PK
+  const erData = {
+    tables: [
+      {
+        name: "User",
+        fields: [
+          { name: "id", pk: true },      // 主键
+          { name: "username", pk: false },
+          { name: "email", pk: false }
+        ]
+      },
+      {
+        name: "Order",
+        fields: [
+          { name: "id", pk: true },
+          { name: "order_date", pk: false },
+          { name: "user_id", pk: false }  // 可视情况标识为 FK
+        ]
+      },
+      {
+        name: "Order",
+        fields: [
+          { name: "id", pk: true },
+          { name: "order_date", pk: false },
+          { name: "user_id", pk: false }  // 可视情况标识为 FK
+        ]
+      },
+      {
+        name: "Order",
+        fields: [
+          { name: "id", pk: true },
+          { name: "order_date", pk: false },
+          { name: "user_id", pk: false }  // 可视情况标识为 FK
+        ]
+      },
+      {
+        name: "Order",
+        fields: [
+          { name: "id", pk: true },
+          { name: "order_date", pk: false },
+          { name: "user_id", pk: false }  // 可视情况标识为 FK
+        ]
+      },
+      {
+        name: "Product",
+        fields: [
+          { name: "id", pk: true },
+          { name: "name", pk: false },
+          { name: "price", pk: false }
+        ]
+      }
+    ],
+    relationships: [
+      { 
+        name: "places",
+        from: "User",
+        to: "Order",
+        cardinality: "1:N"
+      },
+      { 
+        name: "contains",
+        from: "Order",
+        to: "Product",
+        cardinality: "M:N"
+      }
+    ]
+  };
+
+  // =================== 2. 数据转化：构建节点和连线 ===================
+  // 把所有 table 当作一个“实体节点”，关系当作一个“关系节点”。
+  // 同时我们需要在表内部绘制字段（包括 PK）。
+  // 但在力导向布局中，只需要将表整体当作一个节点即可。
+
+  const nodes = [];
+  const links = [];
+
+  // 2.1 表节点
+  erData.tables.forEach(tbl => {
+    nodes.push({
+      id: tbl.name,
+      type: "table",
+      tableData: tbl // 包含表名和字段信息
+    });
+  });
+
+  // 2.2 关系节点
+  erData.relationships.forEach(rel => {
+    // 关系本身也视为一个节点
+    nodes.push({
+      id: rel.name,
+      type: "relationship",
+      name: `${rel.name}\n(${rel.cardinality})`
+    });
+    // 给关系和表之间建立连接
+    links.push({
+      source: rel.name,
+      target: rel.from
+    });
+    links.push({
+      source: rel.name,
+      target: rel.to
+    });
+  });
+
+  // =================== 3. 初始化力导向布局 ===================
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+
+  const svg = d3.select("svg")
+    .attr("width", width)
+    .attr("height", height);
+
+  // 力导向布局
+  const simulation = d3.forceSimulation(nodes)
+    .force("charge", d3.forceManyBody().strength(-800))
+    .force("center", d3.forceCenter(width / 2, height / 2))
+    .force("collision", d3.forceCollide().radius(80))
+    .force("link", d3.forceLink(links).id(d => d.id).distance(180));
+
+  // =================== 4. 绘制连线 ===================
+  const link = svg.selectAll(".link")
+    .data(links)
+    .enter()
+    .append("line")
+    .attr("class", "link");
+
+  // =================== 5. 绘制节点 ===================
+  const nodeGroup = svg.selectAll(".node")
+    .data(nodes)
+    .enter()
+    .append("g")
+    .attr("class", "node")
+    .call(
+      d3.drag()
+        .on("start", dragStarted)
+        .on("drag", dragged)
+        .on("end", dragEnded)
+    );
+
+  // 绘制节点的形状和文字
+  nodeGroup.each(function(d) {
+    const g = d3.select(this);
+
+    // 根据节点类型，绘制不同的形状
+    if (d.type === "table") {
+      // ====== 绘制一个“模拟数据库表”的矩形组件 ======
+      // 计算表的大小
+      const headerHeight = 30;
+      const fieldHeight = 24;
+      const tableWidth = 120;
+      const totalHeight = headerHeight + d.tableData.fields.length * fieldHeight;
+
+      // 1) 外层矩形
+      g.append("rect")
+        .attr("class", "table")
+        .attr("width", tableWidth)
+        .attr("height", totalHeight)
+        .attr("x", -tableWidth / 2)
+        .attr("y", -totalHeight / 2);
+
+      // 2) 表头矩形（作为标题栏）
+      g.append("rect")
+        .attr("class", "table-header")
+        .attr("width", tableWidth)
+        .attr("height", headerHeight)
+        .attr("x", -tableWidth / 2)
+        .attr("y", -totalHeight / 2);
+
+      // 3) 表名文本（在表头区域内居中）
+      g.append("text")
+        .attr("class", "table-header-text")
+        .attr("x", 0)
+        .attr("y", -totalHeight / 2 + headerHeight / 2)
+        .style("text-anchor", "middle")
+        .style("dominant-baseline", "middle")
+        .text(d.tableData.name);
+
+      // 4) 绘制字段文本（包含 PK 标识）
+      d.tableData.fields.forEach((field, i) => {
+        const fieldY = -totalHeight / 2 + headerHeight + i * fieldHeight + fieldHeight / 2;
+        // 如果是主键，给文字做一些特殊标识，这里以“(PK)”来表示
+        let fieldText = field.pk ? `${field.name} (PK)` : field.name;
+
+        g.append("text")
+          .attr("class", "table-field-text")
+          .attr("x", -tableWidth / 2 + 10)  // 左对齐
+          .attr("y", fieldY)
+          .style("dominant-baseline", "middle")
+          .text(fieldText);
+      });
+
+    } else if (d.type === "relationship") {
+      // ====== 绘制关系：菱形 ======
+      const diamondSize = 60;
+      g.append("polygon")
+        .attr("class", "relationship")
+        .attr("points", `
+          0,${-diamondSize/2}
+          ${diamondSize/2},0
+          0,${diamondSize/2}
+          ${-diamondSize/2},0
+        `);
+
+      // 关系文字
+      g.append("text")
+        .attr("x", 0)
+        .attr("y", 0)
+        .style("text-anchor", "middle")
+        .style("dominant-baseline", "middle")
+        .text(d.name);
+    }
+  });
+
+  // =================== 6. 力导向布局更新时，刷新节点和连线位置 ===================
+  simulation.on("tick", () => {
+    // 更新连线位置
+    link
+      .attr("x1", d => d.source.x)
+      .attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x)
+      .attr("y2", d => d.target.y);
+
+    // 更新节点位置
+    nodeGroup
+      .attr("transform", d => `translate(${d.x}, ${d.y})`);
+  });
+
+  // =================== 7. 拖拽回调 ===================
+  function dragStarted(event, d) {
+    if (!event.active) simulation.alphaTarget(0.3).restart();
+    d.fx = d.x;
+    d.fy = d.y;
+  }
+
+  function dragged(event, d) {
+    d.fx = event.x;
+    d.fy = event.y;
+  }
+
+  function dragEnded(event, d) {
+    if (!event.active) simulation.alphaTarget(0);
+    d.fx = null;
+    d.fy = null;
+  }
+</script>
+</body>
+</html>
