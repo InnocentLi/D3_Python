@@ -4,13 +4,154 @@ import tkinter as tk
 from tkinter import filedialog
 from openpyxl import Workbook
 
-# 解析单行声明，保留注释、提取变量类型、变量名称、数组大小
+def find_h_files_recursive(root_dir):
+    """
+    递归遍历目录，返回所有 .h 文件的完整路径列表。
+    """
+    h_files = []
+    for dirpath, _, filenames in os.walk(root_dir):
+        for filename in filenames:
+            if filename.lower().endswith('.h'):
+                h_files.append(os.path.join(dirpath, filename))
+    return h_files
+
+def extract_typedef_structs_from_file(file_path):
+    """
+    从文件中提取 typedef struct 块：
+      格式：typedef struct [optional_tag] { ... } typedef_name;
+    返回列表，每个元素为字典，包含：
+      - file: 文件路径
+      - block_type: "typedef_struct"
+      - name: typedef 名称
+      - content: 大括号内内容
+    """
+    blocks = []
+    try:
+        with open(file_path, 'r', encoding='shift_jis', errors='ignore') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"读取 {file_path} 时出错: {e}")
+        return blocks
+
+    search_start = 0
+    while True:
+        ts_index = content.find("typedef struct", search_start)
+        if ts_index == -1:
+            break
+        brace_start = content.find("{", ts_index)
+        if brace_start == -1:
+            break
+        index = brace_start
+        brace_count = 0
+        while index < len(content):
+            if content[index] == '{':
+                brace_count += 1
+            elif content[index] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    break
+            index += 1
+        if brace_count != 0:
+            search_start = brace_start + 1
+            continue
+        brace_end = index
+        block_content = content[brace_start+1:brace_end].strip()
+        # 在右大括号后查找 typedef 名称，直到遇到分号
+        semicolon_index = content.find(";", brace_end)
+        if semicolon_index == -1:
+            search_start = brace_end + 1
+            continue
+        typedef_part = content[brace_end+1:semicolon_index].strip()
+        if not typedef_part:
+            search_start = semicolon_index + 1
+            continue
+        typedef_name = typedef_part.split()[0]
+        blocks.append({
+            'file': file_path,
+            'block_type': 'typedef_struct',
+            'name': typedef_name,
+            'content': block_content
+        })
+        search_start = semicolon_index + 1
+    return blocks
+
+def extract_fristcalls_from_file(file_path):
+    """
+    从文件中提取 long _firstcall 块：
+      格式：long _firstcall MyBlockName( ... );
+      其中 MyBlockName 为块名称，圆括号内的所有内容（可能多行）为该块代码。
+    返回列表，每个元素为字典，包含：
+      - file: 文件路径
+      - block_type: "fristcall"
+      - name: 块名称（即 MyBlockName）
+      - content: 圆括号内的全部内容
+    """
+    blocks = []
+    try:
+        with open(file_path, 'r', encoding='shift_jis', errors='ignore') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"读取 {file_path} 时出错: {e}")
+        return blocks
+
+    search_start = 0
+    # 匹配 long _firstcall 后面的块名称及左圆括号
+    pattern = re.compile(r'long\s+_firstcall\s+(\w+)\s*\(', re.MULTILINE)
+    while True:
+        m = pattern.search(content, search_start)
+        if not m:
+            break
+        block_name = m.group(1).strip()
+        # 定位左括号位置
+        paren_start = content.find("(", m.end() - 1)
+        if paren_start == -1:
+            search_start = m.end()
+            continue
+        index = paren_start
+        paren_count = 0
+        while index < len(content):
+            if content[index] == '(':
+                paren_count += 1
+            elif content[index] == ')':
+                paren_count -= 1
+                if paren_count == 0:
+                    break
+            index += 1
+        if paren_count != 0:
+            search_start = paren_start + 1
+            continue
+        paren_end = index
+        block_content = content[paren_start+1:paren_end].strip()
+        # 判断后面是否有分号
+        semicolon_index = content.find(";", paren_end)
+        if semicolon_index == -1:
+            search_start = paren_end + 1
+            continue
+
+        blocks.append({
+            'file': file_path,
+            'block_type': 'fristcall',
+            'name': block_name,
+            'content': block_content
+        })
+        search_start = semicolon_index + 1
+    return blocks
+
 def parse_member(line):
-    # 原始声明（确保末尾有分号，方便观察）
+    """
+    解析单行声明，保留注释并尝试提取变量类型、变量名称及数组大小。
+    对于嵌套的 #include 行，则提取其中的文件名。
+    
+    修改后的解析采用一个较宽松的正则表达式，
+    它捕获由单词和星号组成的类型部分，以及最后一个单词作为变量名称，
+    例如：对于 "DFG703 *pp_a;"，会捕获：
+       var_type: "DFG703 *"
+       var_name: "pp_a"
+    """
     original = line.rstrip("\n")
     if not original.endswith(";"):
         original += ";"
-    # 提取块注释 /**/ 和行注释 //  
+    # 提取块注释（/**/）和行注释（//）
     block_comments = re.findall(r'/\*.*?\*/', original, flags=re.DOTALL)
     line_comments = re.findall(r'//.*', original)
     # 去除注释后的代码部分
@@ -30,20 +171,22 @@ def parse_member(line):
             'line_comments': line_comments,
             'include': include
         }
-    # 尝试解析变量声明
-    # 采用较宽松的正则，不限定必须以某些关键字开头
-    pattern = re.compile(r'^(?P<type>[\w\*\s]+?)\s+(?P<name>\*?\w+)(\s*\[\s*(?P<size>[^\]]+)\s*\])?$')
+    # 使用较宽松的正则表达式：
+    #  - (?P<type>(?:\w+\s*\*?\s*)+): 捕获由字母、数字、下划线和星号组成的类型部分，允许有空格
+    #  - \s+(?P<name>\w+): 最后一个单词作为变量名
+    #  - (?:\s*\[\s*(?P<size>[^\]]+)\s*\])?：可选的数组声明部分
+    pattern = re.compile(r'^(?P<type>(?:\w+\s*\*?\s*)+)\s+(?P<name>\w+)(?:\s*\[\s*(?P<size>[^\]]+)\s*\])?$')
     m = pattern.match(code)
     if m:
         var_type = m.group('type').strip()
         var_name = m.group('name').strip()
         array_size = m.group('size').strip() if m.group('size') else ""
     else:
-        # 简单分词：认为第一个 token为类型，其余为变量名
+        # fallback：简单分词方式
         tokens = code.split()
         if len(tokens) >= 2:
-            var_type = tokens[0]
-            var_name = tokens[1]
+            var_type = " ".join(tokens[:-1])
+            var_name = tokens[-1]
             array_size = ""
         else:
             var_type, var_name, array_size = code, "", ""
@@ -57,118 +200,22 @@ def parse_member(line):
         'include': ""
     }
 
-# 处理一个块，按真实行解析块内的成员声明
-def process_block(block_type, block_name, block_lines, file_path):
+def parse_declarations_from_block(block_content):
+    """
+    将块内内容按行拆分（忽略空行），逐行调用 parse_member() 解析。
+    返回成员列表，每个成员为字典，包含解析结果和成员序号（稍后补充）。
+    """
     members = []
-    # 对于 typedef_struct 块，假设块内容位于大括号内
-    # 对于 long _firstcall 块，第一行为块头，后续非空行为成员
-    content_lines = []
-    if block_type == "typedef_struct":
-        inside = False
-        for line in block_lines:
-            if not inside and "{" in line:
-                # 从 "{" 后开始
-                pos = line.find("{")
-                tail = line[pos+1:]
-                if tail.strip():
-                    content_lines.append(tail)
-                inside = True
-            elif inside:
-                # 如果行中含有 "}"，则只取 "}" 前面的部分
-                if "}" in line:
-                    pos = line.find("}")
-                    head = line[:pos]
-                    if head.strip():
-                        content_lines.append(head)
-                    # 块结束，忽略余下内容
-                    break
-                else:
-                    content_lines.append(line)
-    elif block_type == "fristcall":
-        # 第一行为块头，后续非空行为成员
-        if len(block_lines) >= 2:
-            content_lines = block_lines[1:]
-        else:
-            content_lines = []
-    # 按行处理，每行视为一条声明（非空行）
+    lines = block_content.splitlines()
     member_index = 1
-    for line in content_lines:
+    for line in lines:
         if line.strip() == "":
             continue
         parsed = parse_member(line)
-        # 补充块及文件信息
-        parsed['file'] = file_path
-        parsed['block_type'] = block_type
-        parsed['block_name'] = block_name
         parsed['member_index'] = member_index
         member_index += 1
         members.append(parsed)
     return members
-
-# 按行扫描文件，使用状态机识别块并解析块内成员
-def process_file(file_path):
-    members = []
-    current_block_type = None    # "typedef_struct" 或 "fristcall"
-    current_block_name = ""
-    current_block_lines = []
-    with open(file_path, 'r', encoding='shift_jis', errors='ignore') as f:
-        lines = f.readlines()
-    # 按行扫描
-    for line in lines:
-        stripped = line.strip()
-        # 判断是否为 typedef struct 块头
-        if "typedef struct" in stripped:
-            # 如果已有块未结束，则先处理前一个块
-            if current_block_type is not None:
-                members.extend(process_block(current_block_type, current_block_name, current_block_lines, file_path))
-                current_block_type = None
-                current_block_lines = []
-            current_block_type = "typedef_struct"
-            current_block_lines = [line]
-            current_block_name = ""
-            continue
-        # 判断是否为 long _firstcall 块头（注意使用英文圆括号）
-        m_firstcall = re.search(r'^long\s+_firstcall\s*\(\s*([^\)]+)\s*\)', stripped)
-        if m_firstcall:
-            if current_block_type is not None:
-                members.extend(process_block(current_block_type, current_block_name, current_block_lines, file_path))
-                current_block_type = None
-                current_block_lines = []
-            current_block_type = "fristcall"
-            current_block_lines = [line]
-            current_block_name = m_firstcall.group(1).strip()
-            continue
-        # 如果处于块内，则累计行
-        if current_block_type is not None:
-            current_block_lines.append(line)
-            # 对 typedef_struct 块，当行中出现 "}" 并且含有 typedef 名称时认为结束
-            if current_block_type == "typedef_struct" and "}" in line:
-                # 尝试从行中提取 typedef 名称，例如 "} Name;"
-                m = re.search(r'}\s*(\w+)\s*;', line)
-                if m:
-                    current_block_name = m.group(1).strip()
-                # 认为块结束，处理该块
-                members.extend(process_block(current_block_type, current_block_name, current_block_lines, file_path))
-                current_block_type = None
-                current_block_lines = []
-            # 对 fristcall 块，遇到空行则认为块结束
-            elif current_block_type == "fristcall" and stripped == "":
-                members.extend(process_block(current_block_type, current_block_name, current_block_lines, file_path))
-                current_block_type = None
-                current_block_lines = []
-        # 若不在块中，忽略当前行
-    # 文件结束时，如有未处理的块，则处理之
-    if current_block_type is not None and current_block_lines:
-        members.extend(process_block(current_block_type, current_block_name, current_block_lines, file_path))
-    return members
-
-def find_h_files_recursive(root_dir):
-    h_files = []
-    for dirpath, _, filenames in os.walk(root_dir):
-        for filename in filenames:
-            if filename.lower().endswith('.h'):
-                h_files.append(os.path.join(dirpath, filename))
-    return h_files
 
 def save_to_excel(all_members, output_excel):
     wb = Workbook()
@@ -199,6 +246,88 @@ def save_to_excel(all_members, output_excel):
         print(f"Excel 文件已生成：{output_excel}")
     except Exception as e:
         print(f"保存 Excel 文件时出错: {e}")
+
+def process_file(file_path):
+    """
+    按行处理文件，采用状态机识别块（typedef struct 或 firstcall），
+    对每个块调用 parse_declarations_from_block() 解析块内成员。
+    """
+    members = []
+    current_block_type = None    # "typedef_struct" 或 "fristcall"
+    current_block_name = ""
+    current_block_lines = []
+    with open(file_path, 'r', encoding='shift_jis', errors='ignore') as f:
+        lines = f.readlines()
+    for line in lines:
+        stripped = line.strip()
+        # 判断是否为 typedef struct 块头
+        if "typedef struct" in stripped:
+            if current_block_type is not None:
+                block_content = "\n".join(current_block_lines)
+                mems = parse_declarations_from_block(block_content)
+                for mem in mems:
+                    mem['file'] = file_path
+                    mem['block_type'] = current_block_type
+                    mem['block_name'] = current_block_name
+                members.extend(mems)
+                current_block_type = None
+                current_block_lines = []
+            current_block_type = "typedef_struct"
+            current_block_lines = [line]
+            current_block_name = ""
+            continue
+        # 判断是否为 long _firstcall 块头，新格式：long _firstcall MyBlockName(
+        m_firstcall = re.search(r'^long\s+_firstcall\s+(\w+)\s*\(', stripped)
+        if m_firstcall:
+            if current_block_type is not None:
+                block_content = "\n".join(current_block_lines)
+                mems = parse_declarations_from_block(block_content)
+                for mem in mems:
+                    mem['file'] = file_path
+                    mem['block_type'] = current_block_type
+                    mem['block_name'] = current_block_name
+                members.extend(mems)
+                current_block_type = None
+                current_block_lines = []
+            current_block_type = "fristcall"
+            current_block_name = m_firstcall.group(1).strip()
+            current_block_lines = [line]
+            continue
+        # 如果在块内，则累计行
+        if current_block_type is not None:
+            current_block_lines.append(line)
+            if current_block_type == "typedef_struct" and "}" in line:
+                m = re.search(r'}\s*(\w+)\s*;', line)
+                if m:
+                    current_block_name = m.group(1).strip()
+                block_content = "\n".join(current_block_lines)
+                mems = parse_declarations_from_block(block_content)
+                for mem in mems:
+                    mem['file'] = file_path
+                    mem['block_type'] = "typedef_struct"
+                    mem['block_name'] = current_block_name
+                members.extend(mems)
+                current_block_type = None
+                current_block_lines = []
+            elif current_block_type == "fristcall" and stripped.endswith(");"):
+                block_content = "\n".join(current_block_lines)
+                mems = parse_declarations_from_block(block_content)
+                for mem in mems:
+                    mem['file'] = file_path
+                    mem['block_type'] = "fristcall"
+                    mem['block_name'] = current_block_name
+                members.extend(mems)
+                current_block_type = None
+                current_block_lines = []
+    if current_block_type is not None and current_block_lines:
+        block_content = "\n".join(current_block_lines)
+        mems = parse_declarations_from_block(block_content)
+        for mem in mems:
+            mem['file'] = file_path
+            mem['block_type'] = current_block_type
+            mem['block_name'] = current_block_name
+        members.extend(mems)
+    return members
 
 def main():
     root = tk.Tk()
