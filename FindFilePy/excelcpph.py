@@ -23,12 +23,9 @@ def find_h_files_recursive(root_dir):
 def extract_structs_from_file(file_path):
     """
     从一个 .h 文件中提取所有 typedef struct 定义。
-    使用手动匹配括号的方法，提取从 "typedef struct" 到分号结束的整体结构体定义，
-    并返回结构体的 typedef 名称和大括号内部的全部内容。
-    返回一个列表，每个元素为字典，包含：
-      - file: 文件路径
-      - typedef_name: 结构体类型名称
-      - content: 大括号内的全部内容（字符串）
+    采用手动匹配大括号的方法，从 "typedef struct" 开始匹配，
+    提取整个结构体内部的代码和 typedef 名称。
+    返回的每个结果为字典，包含文件路径、结构体名称和大括号内的全部内容。
     """
     structs = []
     try:
@@ -40,15 +37,12 @@ def extract_structs_from_file(file_path):
 
     search_start = 0
     while True:
-        # 定位 typedef struct
         ts_index = content.find("typedef struct", search_start)
         if ts_index == -1:
             break
-        # 定位第一个 '{'
         brace_start = content.find("{", ts_index)
         if brace_start == -1:
             break
-        # 利用计数法匹配大括号
         index = brace_start
         brace_count = 0
         while index < len(content):
@@ -66,7 +60,6 @@ def extract_structs_from_file(file_path):
 
         struct_body = content[brace_start+1:brace_end].strip()
 
-        # 在右大括号后查找 typedef 名称，直到遇到分号
         semicolon_index = content.find(";", brace_end)
         if semicolon_index == -1:
             search_start = brace_end + 1
@@ -86,71 +79,82 @@ def extract_structs_from_file(file_path):
 
     return structs
 
+def parse_variable_declaration(code):
+    """
+    针对去除注释后的单行变量声明进行简单解析：
+      - 去除末尾的分号后，以空白拆分。
+      - 认为最后一个 token 为变量名（可能含有数组声明，如 a[10]），
+        其余部分合并为变量类型。
+      - 如果变量名中含有 '['，则提取数组大小。
+    返回 (var_type, var_name, array_size) 三个字符串。
+    """
+    # 去除末尾分号与多余空白
+    code = code.strip().rstrip(';').strip()
+    if not code:
+        return '', '', ''
+    tokens = code.split()
+    if not tokens:
+        return '', '', ''
+    last_token = tokens[-1]
+    array_size = ''
+    # 如果最后一个 token 中包含数组声明，如 a[10]
+    if '[' in last_token:
+        var_name = last_token.split('[')[0]
+        m = re.search(r'\[\s*([^\]]+)\s*\]', last_token)
+        if m:
+            array_size = m.group(1)
+    else:
+        var_name = last_token
+    var_type = ' '.join(tokens[:-1])
+    return var_type, var_name, array_size
+
 def parse_struct_members(struct_body):
     """
-    将结构体内部内容按分号拆分，解析每一条成员语句。
-    对每条成员：
-      - 提取块注释（/**/形式）和行注释（//形式）；
-      - 去除注释后判断是否为嵌套头文件（#include ...）；
-      - 否则尝试匹配变量定义，提取变量类型、变量名称以及数组大小（如存在）。
-    返回一个成员列表，每个成员为字典，字段包括：
-      - member_code: 原始成员代码（加上分号）
-      - var_type: 变量类型（如果能解析到，否则为空）
-      - var_name: 变量名称（如果能解析到，否则为空）
-      - array_size: 数组大小（如果存在，否则为空）
-      - block_comments: 列表，所有块注释内容（/**/）
-      - line_comments: 列表，所有行注释内容（//...）
-      - include: 嵌套头文件内容（如果该行为 #include 行），否则为空
+    将结构体内部内容按分号拆分，逐条解析每个成员。
+    对每个成员：
+      1. 提取块注释（/**/形式）和行注释（//形式）。
+      2. 去除所有注释后检查是否为嵌套的 #include 行。
+      3. 否则采用 parse_variable_declaration() 解析变量类型、变量名称和数组大小。
+    返回成员列表，每个成员为字典，包含：
+      - member_code: 原始成员代码（带分号）
+      - var_type: 变量类型（解析到的）
+      - var_name: 变量名称（解析到的）
+      - array_size: 数组大小（如存在）
+      - block_comments: 列表，所有块注释内容
+      - line_comments: 列表，所有行注释内容
+      - include: 嵌套头文件（如果该行为 #include 行，否则为空）
     """
     members = []
-    # 按分号拆分（注意：此处假定分号不会出现在注释内部）
+    # 按分号拆分；注意：此处假定分号不会出现在注释内部
     parts = struct_body.split(';')
     for part in parts:
         part = part.strip()
         if not part:
             continue
-        # 恢复分号
         member_line = part + ';'
-        # 提取块注释 /**/  (非贪婪)
+        # 提取块注释 /**/（非贪婪模式）
         block_comments = re.findall(r'/\*.*?\*/', member_line, flags=re.DOTALL)
         # 提取行注释 //...
         line_comments = re.findall(r'//.*', member_line)
-        # 去除所有注释，先去除块注释，再去除行注释
+        # 去除注释：先去掉块注释，再去掉行注释
         code_no_comments = re.sub(r'/\*.*?\*/', '', member_line, flags=re.DOTALL)
         code_no_comments = re.sub(r'//.*', '', code_no_comments)
         code_no_comments = code_no_comments.strip()
         
-        # 判断是否为 #include 行
         include_file = ''
+        var_type = ''
+        var_name = ''
+        array_size = ''
+        # 如果为嵌套头文件声明
         if code_no_comments.startswith("#include"):
-            # 简单提取 #include 后面的内容（支持 "xxx" 或 <xxx>）
             m = re.search(r'#include\s*[<"]([^>"]+)[>"]', code_no_comments)
             if m:
                 include_file = m.group(1)
-            # 将其他变量信息置空
-            var_type = ''
-            var_name = ''
-            array_size = ''
         else:
-            # 尝试解析变量定义
-            # 此处采用简单的正则：
-            # 例如： "int a", "char b[10]", "unsigned long x", "struct Foo* p"
-            # 正则思路：变量类型为连续的字母、数字、下划线、空格和星号（*），后面跟一个变量名，
-            # 可选数组部分： [ 数字或其他表达式 ]
-            var_type = ''
-            var_name = ''
-            array_size = ''
-            # 匹配模式（注意：此处不支持非常复杂的声明，仅适合简单场景）
-            pattern = re.compile(
-                r'^(?P<type>[\w\s\*\_]+?)\s+(?P<name>\w+)(\s*\[\s*(?P<size>[^\]]+)\s*\])?\s*$'
-            )
-            m = pattern.match(code_no_comments)
-            if m:
-                var_type = m.group('type').strip()
-                var_name = m.group('name').strip()
-                if m.group('size'):
-                    array_size = m.group('size').strip()
-
+            # 如果代码中不为空，则尝试解析变量声明
+            if code_no_comments:
+                var_type, var_name, array_size = parse_variable_declaration(code_no_comments)
+        
         members.append({
             'member_code': member_line,
             'var_type': var_type,
@@ -164,9 +168,10 @@ def parse_struct_members(struct_body):
 
 def save_to_excel(all_members, output_excel):
     """
-    将所有成员信息保存到 Excel。
+    将所有结构体成员信息保存到 Excel 文件中。
     每一行对应一条结构体成员，列包括：
-      文件路径, 结构体名称, 成员序号, 成员原始代码, 变量类型, 变量名称, 数组大小, 块注释, 行注释, 嵌套头文件
+      文件路径、结构体名称、成员序号、原始成员代码、变量类型、变量名称、数组大小、
+      块注释、行注释、嵌套头文件
     """
     wb = Workbook()
     ws = wb.active
@@ -198,7 +203,7 @@ def save_to_excel(all_members, output_excel):
         print(f"保存 Excel 文件时出错: {e}")
 
 def main():
-    # 选择目录对话框
+    # 弹出选择目录对话框
     root = tk.Tk()
     root.withdraw()
     root_dir = filedialog.askdirectory(title="请选择要遍历的根目录")
@@ -216,7 +221,6 @@ def main():
         structs = extract_structs_from_file(file)
         for struct in structs:
             struct_name = struct['typedef_name']
-            # 解析结构体成员
             members = parse_struct_members(struct['content'])
             for idx, member in enumerate(members, start=1):
                 member['file'] = file
