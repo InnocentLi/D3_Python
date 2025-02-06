@@ -20,20 +20,23 @@ def find_h_files_recursive(root_dir):
         print(f"遍历 {root_dir} 时出错: {e}")
     return h_files
 
-def extract_structs_from_file(file_path):
+def extract_typedef_structs_from_file(file_path):
     """
-    从一个 .h 文件中提取所有 typedef struct 定义。
-    采用手动匹配大括号的方法，从 "typedef struct" 开始，
-    提取整个结构体内部的代码和 typedef 名称。
-    返回的每个结果为字典，包含文件路径、结构体名称和大括号内的全部内容。
+    从文件中提取 typedef struct 块：
+      模式：typedef struct [optional_tag] { ... } typedef_name;
+    返回列表，每个元素为字典，包含：
+      - file: 文件路径
+      - block_type: 固定为 "typedef_struct"
+      - name: typedef名称
+      - content: 大括号内内容
     """
-    structs = []
+    blocks = []
     try:
         with open(file_path, 'r', encoding='shift_jis', errors='ignore') as f:
             content = f.read()
     except Exception as e:
         print(f"读取 {file_path} 时出错: {e}")
-        return structs
+        return blocks
 
     search_start = 0
     while True:
@@ -57,9 +60,8 @@ def extract_structs_from_file(file_path):
             search_start = brace_start + 1
             continue
         brace_end = index
-
-        struct_body = content[brace_start+1:brace_end].strip()
-
+        block_content = content[brace_start+1:brace_end].strip()
+        # 在右大括号后查找 typedef 名称，直到遇到分号
         semicolon_index = content.find(";", brace_end)
         if semicolon_index == -1:
             search_start = brace_end + 1
@@ -69,101 +71,187 @@ def extract_structs_from_file(file_path):
             search_start = semicolon_index + 1
             continue
         typedef_name = typedef_part.split()[0]
-
-        structs.append({
+        blocks.append({
             'file': file_path,
-            'typedef_name': typedef_name,
-            'content': struct_body
+            'block_type': 'typedef_struct',
+            'name': typedef_name,
+            'content': block_content
         })
         search_start = semicolon_index + 1
+    return blocks
 
-    return structs
-
-def parse_struct_members_by_basictype(struct_body):
+def extract_fristcalls_from_file(file_path):
     """
-    按照 C 语言的基本类型进行解析：
-      1. 利用正则表达式，寻找以 int、char、float、double、short、long、
-         unsigned、signed、struct、union、enum 开头的声明串，直到遇到分号；
-      2. 对于每个匹配到的声明串：
-         - 提取其中所有的块注释（/**/）和行注释（//）；
-         - 去除注释后，分离出“基础类型”和变量部分；
-         - 变量部分可能包含多个变量，以逗号分隔，每个变量可能有指针符号和数组定义；
-         - 分别解析出变量名称和数组大小（如果存在），并将指针符号附加到基础类型中；
-      3. 返回解析得到的所有成员列表，每个成员为一个字典，包含原始声明、变量类型、变量名称、数组大小、块注释、行注释。
+    从文件中提取 long _fristcall 块：
+      格式：long _fristcall( someName ) { ... }
+    返回列表，每个元素为字典，包含：
+      - file: 文件路径
+      - block_type: 固定为 "fristcall"
+      - name: 括号内提取的名称
+      - content: 大括号内内容
+    """
+    blocks = []
+    try:
+        with open(file_path, 'r', encoding='shift_jis', errors='ignore') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"读取 {file_path} 时出错: {e}")
+        return blocks
+
+    # 匹配 long _fristcall( name ) 后跟左大括号
+    pattern = re.compile(r'long\s+_fristcall\s*\(\s*(?P<name>[^\)]+)\s*\)\s*\{', re.MULTILINE)
+    search_start = 0
+    while True:
+        m = pattern.search(content, search_start)
+        if not m:
+            break
+        call_name = m.group('name').strip()
+        brace_start = content.find("{", m.start())
+        if brace_start == -1:
+            search_start = m.end()
+            continue
+        index = brace_start
+        brace_count = 0
+        while index < len(content):
+            if content[index] == '{':
+                brace_count += 1
+            elif content[index] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    break
+            index += 1
+        if brace_count != 0:
+            search_start = brace_start + 1
+            continue
+        brace_end = index
+        block_content = content[brace_start+1:brace_end].strip()
+        blocks.append({
+            'file': file_path,
+            'block_type': 'fristcall',
+            'name': call_name,
+            'content': block_content
+        })
+        search_start = brace_end + 1
+    return blocks
+
+def parse_declaration(code):
+    """
+    尝试解析单个变量声明（不含末尾分号）的字符串，
+    返回 (var_type, var_name, array_size)。
+    使用较宽松的正则，不再限定必须以 int/char 开头。
+    如果匹配失败，做简单拆分：认为第一个 token 为类型，其余为变量名。
+    """
+    pattern = re.compile(r'^(?P<type>[\w\*\s]+?)\s+(?P<name>\*?\w+)(\s*\[\s*(?P<size>[^\]]+)\s*\])?$')
+    m = pattern.match(code)
+    if m:
+        var_type = m.group('type').strip()
+        var_name = m.group('name').strip()
+        array_size = m.group('size').strip() if m.group('size') else ""
+        return var_type, var_name, array_size
+    else:
+        tokens = code.split()
+        if len(tokens) >= 2:
+            return tokens[0], tokens[1], ""
+        else:
+            return code, "", ""
+
+def parse_member(decl_str):
+    """
+    针对单个声明字符串（不含末尾分号），解析出：
+      - 原始声明（加上分号）
+      - 变量类型、变量名称、数组大小
+      - 提取块注释和行注释
+      - 如果去除注释后以 "#include" 开头，则视为嵌套头文件引用
+    """
+    original = decl_str.strip() + ";"
+    block_comments = re.findall(r'/\*.*?\*/', original, flags=re.DOTALL)
+    line_comments = re.findall(r'//.*', original)
+    # 去除注释后用于解析代码部分
+    code = re.sub(r'/\*.*?\*/', '', original, flags=re.DOTALL)
+    code = re.sub(r'//.*', '', code)
+    code = code.strip().rstrip(';').strip()
+    # 判断是否为嵌套的 #include 行
+    if code.startswith("#include"):
+        m = re.search(r'#include\s*[<"]([^>"]+)[>"]', code)
+        include = m.group(1) if m else ""
+        return {
+            'member_code': original,
+            'var_type': "",
+            'var_name': "",
+            'array_size': "",
+            'block_comments': block_comments,
+            'line_comments': line_comments,
+            'include': include
+        }
+    var_type, var_name, array_size = parse_declaration(code)
+    return {
+        'member_code': original,
+        'var_type': var_type,
+        'var_name': var_name,
+        'array_size': array_size,
+        'block_comments': block_comments,
+        'line_comments': line_comments,
+        'include': ""
+    }
+
+def parse_declarations_from_block(block_content):
+    """
+    针对块内代码进行成员解析：
+      1. 先按分号拆分（假设分号不在注释中）
+      2. 对每个部分，若其中存在逗号，则认为是一条多变量声明，
+         则采用“类型”部分+逗号分隔的各个变量进行逐个解析；
+      3. 如果不含逗号，则直接解析为一条声明。
+    返回成员列表，每个成员为 parse_member() 的结果字典。
     """
     members = []
-    # 匹配以基本类型开头的声明（注意：\b 确保完整单词匹配；.*? 非贪婪匹配到第一个分号）
-    pattern = re.compile(
-        r'(?P<decl>\s*(?:(?:int|char|float|double|short|long|unsigned|signed|struct|union|enum)\b.*?;))',
-        re.DOTALL | re.MULTILINE
-    )
-    for match in pattern.finditer(struct_body):
-        decl = match.group('decl')
-        # 提取注释
-        block_comments = re.findall(r'/\*.*?\*/', decl, flags=re.DOTALL)
-        line_comments = re.findall(r'//.*', decl)
-        # 去除所有注释，方便后续解析
-        decl_no_comments = re.sub(r'/\*.*?\*/', '', decl, flags=re.DOTALL)
-        decl_no_comments = re.sub(r'//.*', '', decl_no_comments)
-        decl_no_comments = decl_no_comments.strip().rstrip(';').strip()
-        # 利用正则分离基础类型与变量部分
-        m = re.match(
-            r'^(?P<base>(?:int|char|float|double|short|long|unsigned|signed|struct|union|enum)(?:[\w\s\*\_]*))\s+(?P<vars>.+)$',
-            decl_no_comments
-        )
-        if not m:
+    # 按分号拆分
+    parts = block_content.split(';')
+    for part in parts:
+        part = part.strip()
+        if not part:
             continue
-        base_type = m.group('base').strip()
-        vars_str = m.group('vars').strip()
-        # 将变量部分以逗号分割（针对类似 int a, *b, c[10] 的情况）
-        var_tokens = [t.strip() for t in vars_str.split(',')]
-        for token in var_tokens:
-            array_size = ''
-            # 如果变量中包含数组定义，如 a[10]
-            m_array = re.search(r'\[(.*?)\]', token)
-            if m_array:
-                array_size = m_array.group(1).strip()
-                token = re.sub(r'\[.*?\]', '', token).strip()
-            # 提取变量名称，若有指针符号则剥离
-            pointer_prefix = ''
-            while token.startswith('*'):
-                pointer_prefix += '*'
-                token = token[1:].strip()
-            var_name = token
-            # 如果存在指针符号，则类型加上
-            var_type = base_type if not pointer_prefix else f"{base_type} {pointer_prefix}"
-            members.append({
-                'member_code': decl.strip(),  # 原始声明字符串
-                'var_type': var_type,
-                'var_name': var_name,
-                'array_size': array_size,
-                'block_comments': block_comments,
-                'line_comments': line_comments,
-                'include': ''  # 本函数暂不处理 #include 嵌套
-            })
+        # 若包含逗号，则认为前面部分为类型，后面为多个变量
+        if ',' in part:
+            # 用正则分离类型和变量部分
+            m = re.match(r'^(?P<type>[\w\*\s]+?)\s+(?P<vars>.+)$', part)
+            if m:
+                base_type = m.group('type').strip()
+                vars_part = m.group('vars').strip()
+                var_tokens = [v.strip() for v in vars_part.split(',')]
+                for token in var_tokens:
+                    full_decl = base_type + " " + token
+                    member = parse_member(full_decl)
+                    members.append(member)
+            else:
+                # 若匹配失败，则整体解析
+                member = parse_member(part)
+                members.append(member)
+        else:
+            member = parse_member(part)
+            members.append(member)
     return members
 
 def save_to_excel(all_members, output_excel):
     """
-    将所有结构体成员信息保存到 Excel 文件中。
-    每一行对应一条结构体成员，列包括：
-      文件路径、结构体名称、成员序号、原始声明、变量类型、变量名称、数组大小、
-      块注释、行注释、嵌套头文件（若有）
+    将所有成员信息保存到 Excel 文件中。
+    每一行对应一条成员，字段包括：
+      文件路径、块类型、块名称、成员序号、原始声明、变量类型、变量名称、
+      数组大小、块注释、行注释、嵌套头文件
     """
     wb = Workbook()
     ws = wb.active
     ws.title = "struct_members"
     headers = [
-        '文件路径', '结构体名称', '成员序号', '原始声明',
+        '文件路径', '块类型', '块名称', '成员序号', '原始声明',
         '变量类型', '变量名称', '数组大小',
         '块注释', '行注释', '嵌套头文件'
     ]
     ws.append(headers)
-
     for member in all_members:
         ws.append([
             member.get('file', ''),
-            member.get('struct_name', ''),
+            member.get('block_type', ''),
+            member.get('block_name', ''),
             member.get('member_index', ''),
             member.get('member_code', ''),
             member.get('var_type', ''),
@@ -195,22 +283,36 @@ def main():
 
     all_members = []
     for file in h_files:
-        structs = extract_structs_from_file(file)
-        for struct in structs:
-            struct_name = struct['typedef_name']
-            # 使用按基本类型解析成员的方法
-            members = parse_struct_members_by_basictype(struct['content'])
+        # 提取 typedef struct 块
+        typedef_blocks = extract_typedef_structs_from_file(file)
+        # 提取 long _fristcall 块
+        fristcall_blocks = extract_fristcalls_from_file(file)
+        # 合并两类块
+        blocks = []
+        for b in typedef_blocks:
+            # 对 typedef_struct 块，块名称取 typedef_name
+            b['block_type'] = 'typedef_struct'
+            b['block_name'] = b['name']
+            blocks.append(b)
+        for b in fristcall_blocks:
+            b['block_type'] = 'fristcall'
+            b['block_name'] = b['name']
+            blocks.append(b)
+        # 针对每个块，解析成员
+        for blk in blocks:
+            members = parse_declarations_from_block(blk['content'])
             for idx, member in enumerate(members, start=1):
                 member['file'] = file
-                member['struct_name'] = struct_name
+                member['block_type'] = blk['block_type']
+                member['block_name'] = blk['block_name']
                 member['member_index'] = idx
                 all_members.append(member)
-            print(f"从 {file} 中结构体 {struct_name} 提取 {len(members)} 条成员。")
+            print(f"从 {file} 中块 {blk['block_type']}({blk['block_name']}) 提取 {len(members)} 条成员。")
 
     if all_members:
         save_to_excel(all_members, output_excel)
     else:
-        print("未提取到任何结构体成员。")
+        print("未提取到任何结构体/块成员。")
 
 if __name__ == "__main__":
     main()
