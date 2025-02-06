@@ -1,5 +1,7 @@
 import os
 import re
+import tkinter as tk
+from tkinter import filedialog
 from openpyxl import Workbook
 
 def find_h_files(root_dir):
@@ -15,7 +17,7 @@ def extract_structs_from_file(file_path):
     """
     从一个 .h 文件中提取所有 typedef struct 定义。
     
-    这里假设结构体的定义格式为：
+    假设结构体的定义格式为：
     
         typedef struct [可选的标签] {
             ... 结构体内容 ...
@@ -23,11 +25,11 @@ def extract_structs_from_file(file_path):
     
     返回一个列表，每个元素是一个字典，包含：
       - file: 文件路径
+      - tag: 可选的标签名称
       - typedef_name: 结构体类型名称
       - content: 大括号内的内容
     """
     structs = []
-    # 读取文件内容
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
@@ -35,22 +37,12 @@ def extract_structs_from_file(file_path):
         print(f"读取 {file_path} 时出错: {e}")
         return structs
 
-    # 使用 DOTALL 模式使 . 能匹配换行符
-    # 正则解释：
-    #   typedef\s+struct\s*     匹配 "typedef struct" 后可有空白
-    #   (\w+)?\s*              可选的标签名称（不一定有），比如 "Foo"
-    #   \{(.*?)\}              非贪婪匹配大括号内的内容
-    #   \s*(\w+)\s*;           匹配 typedef 后的类型名称以及分号
     pattern = re.compile(
         r'typedef\s+struct\s*(\w+)?\s*\{(.*?)\}\s*(\w+)\s*;',
         re.DOTALL
     )
 
-    matches = pattern.finditer(content)
-    for match in matches:
-        # group(1): 可选的标签名称
-        # group(2): 大括号内的内容
-        # group(3): typedef名称
+    for match in pattern.finditer(content):
         struct_info = {
             'file': file_path,
             'tag': match.group(1) if match.group(1) else '',
@@ -85,11 +77,17 @@ def save_to_excel(structs, output_excel):
         print(f"保存 Excel 文件时出错: {e}")
 
 def main():
-    # 设置要遍历的根目录（可根据需要修改）
-    root_dir = '.'  # 当前目录
+    # 使用 tkinter.filedialog 弹出选择目录对话框
+    root = tk.Tk()
+    root.withdraw()  # 隐藏主窗口
+    root_dir = filedialog.askdirectory(title="请选择要遍历的根目录")
+    if not root_dir:
+        print("未选择目录，程序退出。")
+        return
+
     output_excel = 'typedef_structs.xlsx'
 
-    print("开始遍历目录，查找 .h 文件...")
+    print(f"开始遍历目录 {root_dir} ，查找 .h 文件...")
     h_files = find_h_files(root_dir)
     print(f"共找到 {len(h_files)} 个 .h 文件。")
 
