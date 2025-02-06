@@ -25,28 +25,33 @@ def find_h_files_recursive(root_dir):
 def extract_structs_from_file(file_path):
     """
     从一个 .h 文件中提取所有 typedef struct 定义。
-    
+
     假设结构体的定义格式为：
-    
+
         typedef struct [可选的标签] {
-            ... 结构体内容 ...
+            ... 结构体内容（可能包含多行代码） ...
         } typedef_name;
-    
+
     返回一个列表，每个元素是一个字典，包含：
       - file: 文件路径
       - tag: 可选的标签名称
       - typedef_name: 结构体类型名称
-      - content: 大括号内的内容
+      - content: 花括号内的全部内容（多行也可）
     """
     structs = []
     try:
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        # 文件编码指定为 shift_jis
+        with open(file_path, 'r', encoding='shift_jis', errors='ignore') as f:
             content = f.read()
     except Exception as e:
         print(f"读取 {file_path} 时出错: {e}")
         return structs
 
-    # 使用 DOTALL 模式使 . 能匹配换行符
+    # 正则说明：
+    # 1. typedef\s+struct\s*       匹配 "typedef struct" 后可有空白
+    # 2. (\w+)?\s*                匹配可选的标签名称（可能没有）
+    # 3. \{(.*?)\}                DOTALL 模式下匹配大括号内所有内容（非贪婪）
+    # 4. \s*(\w+)\s*;             匹配 typedef 后的类型名称和分号
     pattern = re.compile(
         r'typedef\s+struct\s*(\w+)?\s*\{(.*?)\}\s*(\w+)\s*;',
         re.DOTALL
