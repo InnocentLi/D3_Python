@@ -4,13 +4,22 @@ import tkinter as tk
 from tkinter import filedialog
 from openpyxl import Workbook
 
-def find_h_files(root_dir):
-    """递归遍历目录，返回所有 .h 文件的完整路径列表。"""
+def find_h_files_recursive(root_dir):
+    """
+    递归遍历目录，返回所有 .h 文件的完整路径列表。
+    使用 os.scandir 手动递归遍历目录及文件。
+    """
     h_files = []
-    for dirpath, _, filenames in os.walk(root_dir):
-        for filename in filenames:
-            if filename.lower().endswith('.h'):
-                h_files.append(os.path.join(dirpath, filename))
+    try:
+        with os.scandir(root_dir) as it:
+            for entry in it:
+                if entry.is_file() and entry.name.lower().endswith('.h'):
+                    h_files.append(entry.path)
+                elif entry.is_dir():
+                    # 对子目录递归调用
+                    h_files.extend(find_h_files_recursive(entry.path))
+    except Exception as e:
+        print(f"遍历 {root_dir} 时出错: {e}")
     return h_files
 
 def extract_structs_from_file(file_path):
@@ -37,6 +46,7 @@ def extract_structs_from_file(file_path):
         print(f"读取 {file_path} 时出错: {e}")
         return structs
 
+    # 使用 DOTALL 模式使 . 能匹配换行符
     pattern = re.compile(
         r'typedef\s+struct\s*(\w+)?\s*\{(.*?)\}\s*(\w+)\s*;',
         re.DOTALL
@@ -53,12 +63,12 @@ def extract_structs_from_file(file_path):
     return structs
 
 def save_to_excel(structs, output_excel):
-    """将结构体信息保存到 Excel 文件中。"""
+    """将提取的结构体信息保存到 Excel 文件中。"""
     wb = Workbook()
     ws = wb.active
     ws.title = "typedef_structs"
 
-    # 设置表头
+    # 写入表头
     headers = ['文件路径', '标签', 'typedef名称', '结构体内容']
     ws.append(headers)
 
@@ -77,7 +87,7 @@ def save_to_excel(structs, output_excel):
         print(f"保存 Excel 文件时出错: {e}")
 
 def main():
-    # 使用 tkinter.filedialog 弹出选择目录对话框
+    # 弹出选择目录对话框
     root = tk.Tk()
     root.withdraw()  # 隐藏主窗口
     root_dir = filedialog.askdirectory(title="请选择要遍历的根目录")
@@ -87,8 +97,8 @@ def main():
 
     output_excel = 'typedef_structs.xlsx'
 
-    print(f"开始遍历目录 {root_dir} ，查找 .h 文件...")
-    h_files = find_h_files(root_dir)
+    print(f"开始递归遍历目录 {root_dir} ，查找 .h 文件...")
+    h_files = find_h_files_recursive(root_dir)
     print(f"共找到 {len(h_files)} 个 .h 文件。")
 
     all_structs = []
