@@ -7,7 +7,6 @@ from openpyxl import Workbook
 # -------------------------------
 # 预编译常用正则表达式
 # -------------------------------
-PATTERN_INCLUDE = re.compile(r'#include\s*[<"]([^>"]+)[>"]')
 PATTERN_MEMBER = re.compile(
     r'^(?P<type>(?:\w+\s*\*?\s*)+)\s+(?P<name>\w+)(?:\s*\[\s*(?P<size>[^\]]+)\s*\])?$'
 )
@@ -143,31 +142,32 @@ def parse_member(line):
     code = re.sub(r'/\*.*?\*/', '', original, flags=re.DOTALL)
     code = re.sub(r'//.*', '', code)
     code = code.strip().rstrip(';').strip()
-    # 如果代码以 "#include" 开头，则认为是头文件行，直接返回 None（不输出）
-    if code.startswith("#include"):
+    # 如果该行仅为大括号或小括号，则跳过
+    if code in {"{", "}", "(", ")"}:
         return None
+    # 去除代码中所有大括号和小括号
+    cleaned_code = code.replace("{", "").replace("}", "").replace("(", "").replace(")", "").strip()
     # 使用较宽松的正则表达式捕获类型和变量名
-    m = PATTERN_MEMBER.match(code)
+    m = PATTERN_MEMBER.match(cleaned_code)
     if m:
         var_type = m.group('type').strip()
         var_name = m.group('name').strip()
         array_size = m.group('size').strip() if m.group('size') else ""
     else:
-        tokens = code.split()
+        tokens = cleaned_code.split()
         if len(tokens) >= 2:
             var_type = " ".join(tokens[:-1])
             var_name = tokens[-1]
             array_size = ""
         else:
-            var_type, var_name, array_size = code, "", ""
+            var_type, var_name, array_size = cleaned_code, "", ""
     return {
-        'member_code': original,
+        'member_code': cleaned_code,
         'var_type': var_type,
         'var_name': var_name,
         'array_size': array_size,
         'block_comments': block_comments,
-        'line_comments': line_comments,
-        'include': ""
+        'line_comments': line_comments
     }
 
 # -------------------------------
@@ -175,17 +175,16 @@ def parse_member(line):
 # -------------------------------
 def parse_declarations_from_block(block_content):
     members = []
-    # 按行拆分后过滤空行
     for line in block_content.splitlines():
         if line.strip() == "":
             continue
         parsed = parse_member(line)
-        if parsed is not None:  # 如果为头文件行，则 parse_member 返回 None
+        if parsed is not None:
             members.append(parsed)
     return members
 
 # -------------------------------
-# 按行顺序处理文件，使用状态机识别块
+# 顺序处理文件，使用状态机识别块
 # -------------------------------
 def process_file(file_path):
     members = []
@@ -255,7 +254,6 @@ def process_file(file_path):
                         members.extend(mems)
                         current_block_type = None
                         current_block_lines = []
-        # 文件结束时处理未结束块
         if current_block_type is not None and current_block_lines:
             block_content = "\n".join(current_block_lines)
             mems = parse_declarations_from_block(block_content)
@@ -283,7 +281,6 @@ def save_to_excel(all_members, output_excel):
     ws.append(headers)
     member_index = 1
     for member in all_members:
-        # 若解析时没有给出成员序号，则可以使用累计序号
         ws.append([
             member.get('file', ''),
             member.get('block_type', ''),
@@ -307,7 +304,6 @@ def save_to_excel(all_members, output_excel):
 # 主程序入口（顺序处理所有 .h 文件）
 # -------------------------------
 def main():
-    # 弹出目录选择对话框
     root = tk.Tk()
     root.withdraw()
     root_dir = filedialog.askdirectory(title="请选择要遍历的根目录")
@@ -315,7 +311,7 @@ def main():
         print("未选择目录，程序退出。")
         return
     output_excel = 'struct_members.xlsx'
-    print(f"开始递归遍历目录 {root_dir} ，查找 .h 文件...")
+    print(f"开始遍历目录 {root_dir} ，查找 .h 文件...")
     h_files = find_h_files_recursive(root_dir)
     print(f"共找到 {len(h_files)} 个 .h 文件。")
     all_members = []
