@@ -3,7 +3,6 @@ import re
 import tkinter as tk
 from tkinter import filedialog
 from openpyxl import Workbook
-import concurrent.futures
 
 # -------------------------------
 # 预编译常用正则表达式
@@ -16,7 +15,7 @@ PATTERN_FIRSTCALL = re.compile(r'^long\s+_firstcall\s+(\w+)\s*\(')
 PATTERN_TYPEDEF_STRUCT_END = re.compile(r'}\s*(\w+)\s*;')
 
 # -------------------------------
-# 文件遍历函数
+# 遍历目录下所有 .h 文件（顺序处理）
 # -------------------------------
 def find_h_files_recursive(root_dir):
     h_files = []
@@ -61,7 +60,6 @@ def extract_typedef_structs_from_file(file_path):
             continue
         brace_end = index
         block_content = content[brace_start+1:brace_end].strip()
-        # 提取 typedef 名称：在右大括号后查找直到分号处的部分
         semicolon_index = content.find(";", brace_end)
         if semicolon_index == -1:
             search_start = brace_end + 1
@@ -93,7 +91,6 @@ def extract_fristcalls_from_file(file_path):
         return blocks
 
     search_start = 0
-    # 匹配形式：long _firstcall MyBlockName( ... );
     pattern = re.compile(r'long\s+_firstcall\s+(\w+)\s*\(', re.MULTILINE)
     while True:
         m = pattern.search(content, search_start)
@@ -123,7 +120,6 @@ def extract_fristcalls_from_file(file_path):
         if semicolon_index == -1:
             search_start = paren_end + 1
             continue
-
         blocks.append({
             'file': file_path,
             'block_type': 'fristcall',
@@ -140,25 +136,17 @@ def parse_member(line):
     original = line.rstrip("\n")
     if not original.endswith(";"):
         original += ";"
-    # 预先提取注释
+    # 提取块注释和行注释
     block_comments = re.findall(r'/\*.*?\*/', original, flags=re.DOTALL)
     line_comments = re.findall(r'//.*', original)
     # 去除注释后的代码部分
     code = re.sub(r'/\*.*?\*/', '', original, flags=re.DOTALL)
     code = re.sub(r'//.*', '', code)
     code = code.strip().rstrip(';').strip()
+    # 如果代码以 "#include" 开头，则认为是头文件行，直接返回 None（不输出）
     if code.startswith("#include"):
-        m = PATTERN_INCLUDE.search(code)
-        include = m.group(1) if m else ""
-        return {
-            'member_code': original,
-            'var_type': "",
-            'var_name': "",
-            'array_size': "",
-            'block_comments': block_comments,
-            'line_comments': line_comments,
-            'include': include
-        }
+        return None
+    # 使用较宽松的正则表达式捕获类型和变量名
     m = PATTERN_MEMBER.match(code)
     if m:
         var_type = m.group('type').strip()
@@ -186,18 +174,18 @@ def parse_member(line):
 # 将块内内容按行拆分并解析每一行声明
 # -------------------------------
 def parse_declarations_from_block(block_content):
-    lines = (line for line in block_content.splitlines() if line.strip() != "")
     members = []
-    member_index = 1
-    for line in lines:
+    # 按行拆分后过滤空行
+    for line in block_content.splitlines():
+        if line.strip() == "":
+            continue
         parsed = parse_member(line)
-        parsed['member_index'] = member_index
-        member_index += 1
-        members.append(parsed)
+        if parsed is not None:  # 如果为头文件行，则 parse_member 返回 None
+            members.append(parsed)
     return members
 
 # -------------------------------
-# 并行处理时的文件包装函数（按行扫描，状态机识别块）
+# 按行顺序处理文件，使用状态机识别块
 # -------------------------------
 def process_file(file_path):
     members = []
@@ -267,7 +255,7 @@ def process_file(file_path):
                         members.extend(mems)
                         current_block_type = None
                         current_block_lines = []
-        # 文件末尾处理未结束块
+        # 文件结束时处理未结束块
         if current_block_type is not None and current_block_lines:
             block_content = "\n".join(current_block_lines)
             mems = parse_declarations_from_block(block_content)
@@ -281,10 +269,45 @@ def process_file(file_path):
     return members
 
 # -------------------------------
-# 主程序入口：边处理文件边写入 Excel
+# 将所有成员信息一次性写入 Excel（顺序处理）
+# -------------------------------
+def save_to_excel(all_members, output_excel):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "struct_members"
+    headers = [
+        '文件路径', '块类型', '块名称', '成员序号', '原始声明',
+        '变量类型', '变量名称', '数组大小',
+        '块注释', '行注释'
+    ]
+    ws.append(headers)
+    member_index = 1
+    for member in all_members:
+        # 若解析时没有给出成员序号，则可以使用累计序号
+        ws.append([
+            member.get('file', ''),
+            member.get('block_type', ''),
+            member.get('block_name', ''),
+            member_index,
+            member.get('member_code', ''),
+            member.get('var_type', ''),
+            member.get('var_name', ''),
+            member.get('array_size', ''),
+            "\n".join(member.get('block_comments', [])),
+            "\n".join(member.get('line_comments', []))
+        ])
+        member_index += 1
+    try:
+        wb.save(output_excel)
+        print(f"Excel 文件已生成：{output_excel}")
+    except Exception as e:
+        print(f"保存 Excel 文件时出错: {e}")
+
+# -------------------------------
+# 主程序入口（顺序处理所有 .h 文件）
 # -------------------------------
 def main():
-    # 选择根目录
+    # 弹出目录选择对话框
     root = tk.Tk()
     root.withdraw()
     root_dir = filedialog.askdirectory(title="请选择要遍历的根目录")
@@ -295,49 +318,15 @@ def main():
     print(f"开始递归遍历目录 {root_dir} ，查找 .h 文件...")
     h_files = find_h_files_recursive(root_dir)
     print(f"共找到 {len(h_files)} 个 .h 文件。")
-
-    # 使用 openpyxl 的 write_only 模式创建工作簿，方便边处理边写入
-    wb = Workbook(write_only=True)
-    ws = wb.create_sheet("struct_members")
-    headers = [
-        '文件路径', '块类型', '块名称', '成员序号', '原始声明',
-        '变量类型', '变量名称', '数组大小',
-        '块注释', '行注释', '嵌套头文件'
-    ]
-    ws.append(headers)
-
-    # 使用线程池并行处理文件
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(process_file, file): file for file in h_files}
-        for future in concurrent.futures.as_completed(futures):
-            file = futures[future]
-            try:
-                members = future.result()
-                print(f"从 {file} 中提取了 {len(members)} 条成员。")
-                # 直接将当前文件的每条成员写入 Excel
-                for mem in members:
-                    ws.append([
-                        mem.get('file', ''),
-                        mem.get('block_type', ''),
-                        mem.get('block_name', ''),
-                        mem.get('member_index', ''),
-                        mem.get('member_code', ''),
-                        mem.get('var_type', ''),
-                        mem.get('var_name', ''),
-                        mem.get('array_size', ''),
-                        "\n".join(mem.get('block_comments', [])),
-                        "\n".join(mem.get('line_comments', [])),
-                        mem.get('include', '')
-                    ])
-            except Exception as e:
-                print(f"处理文件 {file} 时出错：{e}")
-
-    # 保存 Excel 文件
-    try:
-        wb.save(output_excel)
-        print(f"Excel 文件已生成：{output_excel}")
-    except Exception as e:
-        print(f"保存 Excel 文件时出错: {e}")
+    all_members = []
+    for file in h_files:
+        file_members = process_file(file)
+        print(f"从 {file} 中提取了 {len(file_members)} 条成员。")
+        all_members.extend(file_members)
+    if all_members:
+        save_to_excel(all_members, output_excel)
+    else:
+        print("未提取到任何块成员。")
 
 if __name__ == "__main__":
     main()
