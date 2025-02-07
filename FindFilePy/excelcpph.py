@@ -60,8 +60,6 @@ def parse_member(line):
 # 处理一个块，按真实行解析块内的成员声明
 def process_block(block_type, block_name, block_lines, file_path):
     members = []
-    # 对于 typedef_struct 块，假设块内容位于大括号内
-    # 对于 long _firstcall 块，第一行为块头，后续非空行为成员
     content_lines = []
     if block_type == "typedef_struct":
         inside = False
@@ -85,8 +83,11 @@ def process_block(block_type, block_name, block_lines, file_path):
                 else:
                     content_lines.append(line)
     elif block_type == "fristcall":
-        # 第一行为块头，后续非空行为成员
-        if len(block_lines) >= 2:
+        # 第一行为块头，最后一行为块尾，取中间非空行作为成员声明
+        if len(block_lines) >= 3:
+            content_lines = block_lines[1:-1]
+        elif len(block_lines) >= 2:
+            # 如果没有明确的结束行，取除块头外的所有行
             content_lines = block_lines[1:]
         else:
             content_lines = []
@@ -127,8 +128,8 @@ def process_file(file_path):
             current_block_lines = [line]
             current_block_name = ""
             continue
-        # 判断是否为 long _firstcall 块头（注意使用英文圆括号）
-        m_firstcall = re.search(r'^long\s+_firstcall\s*\(\s*([^\)]+)\s*\)', stripped)
+        # 判断是否为 long _firstcall 块头，匹配格式：long _firstcall MyBlockName(
+        m_firstcall = re.search(r'^long\s+_firstcall\s+(\w+)\s*\(', stripped)
         if m_firstcall:
             if current_block_type is not None:
                 members.extend(process_block(current_block_type, current_block_name, current_block_lines, file_path))
@@ -143,16 +144,14 @@ def process_file(file_path):
             current_block_lines.append(line)
             # 对 typedef_struct 块，当行中出现 "}" 并且含有 typedef 名称时认为结束
             if current_block_type == "typedef_struct" and "}" in line:
-                # 尝试从行中提取 typedef 名称，例如 "} Name;"
                 m = re.search(r'}\s*(\w+)\s*;', line)
                 if m:
                     current_block_name = m.group(1).strip()
-                # 认为块结束，处理该块
                 members.extend(process_block(current_block_type, current_block_name, current_block_lines, file_path))
                 current_block_type = None
                 current_block_lines = []
-            # 对 fristcall 块，遇到空行则认为块结束
-            elif current_block_type == "fristcall" and stripped == "":
+            # 对 fristcall 块，遇到行尾为 ");" 则认为块结束
+            elif current_block_type == "fristcall" and stripped.endswith(");"):
                 members.extend(process_block(current_block_type, current_block_name, current_block_lines, file_path))
                 current_block_type = None
                 current_block_lines = []
