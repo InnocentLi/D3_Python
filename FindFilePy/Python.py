@@ -1,81 +1,124 @@
 import os
-import json
-import asyncio
-from aiofiles import open as aio_open
+import re
+import openpyxl
+from openpyxl import Workbook
 
-# 用于限制并发数量，避免递归层数过多时任务爆炸式增长
-# 根据实际情况调整此数值。数值过大会增加系统负担，过小则并发度不足。
-SEM = asyncio.Semaphore(100)
+import tkinter as tk
+from tkinter import filedialog
 
-async def list_files_async(directory: str) -> list[str]:
+def parse_cma_file(file_path):
     """
-    异步递归遍历目录，返回文件路径列表。
-
-    :param directory: 要遍历的目录路径
-    :return: 文件路径列表
+    解析单个 .cma 文件，返回其中的所有 *LINE 块。
+    每个块会以 (块内容字符串) 的形式返回。
     """
-    file_list = []
+    results = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    
+    # 清洗行：去掉首尾空格和换行
+    lines = [line.strip() for line in lines]
+    
+    current_block = []
+    collecting_block = False  # 标识是否在收集当前 *LINE 块
 
-    try:
-        # 用 to_thread+scandir 提升 I/O 性能，并异步获取目录项
-        async with SEM:
-            entries = await asyncio.to_thread(os.scandir, directory)
-    except PermissionError:
-        # 无权限时跳过此目录
-        print(f"权限不足，跳过目录: {directory}")
-        return file_list
-    except Exception as e:
-        print(f"访问目录时发生错误: {directory}\n错误信息: {e}")
-        return file_list
+    for line in lines:
+        # 检测是否为 *LINE 开头
+        if line.startswith("*LINE"):
+            # 如果之前有未结束的块，可以先存起来
+            if collecting_block and current_block:
+                # 上一个块结束
+                combined_line = " ".join(current_block)
+                results.append(combined_line)
+                current_block = []
+            
+            # 开始新的块收集
+            collecting_block = True
+            current_block.append(line)  # 把这行也先存起来
 
-    # 准备并行处理子目录任务
-    tasks = []
-    for entry in entries:
-        if entry.is_file():
-            file_list.append(entry.path)
-        elif entry.is_dir():
-            tasks.append(list_files_async(entry.path))
+        else:
+            if collecting_block:
+                current_block.append(line)
+                # 如果本行包含 `;`，则表示这个块结束
+                if ';' in line:
+                    combined_line = " ".join(current_block)
+                    results.append(combined_line)
+                    
+                    # 重新开始等待下一个 *LINE
+                    collecting_block = False
+                    current_block = []
+    
+    # 如果文件末尾还有没结束的块，也存一下
+    if collecting_block and current_block:
+        combined_line = " ".join(current_block)
+        results.append(combined_line)
+    
+    return results
 
-    # 并行处理所有子目录
-    if tasks:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            # 如果有子任务出错，这里可以处理异常或跳过
-            if isinstance(r, Exception):
-                print(f"子任务发生异常: {r}")
-            elif isinstance(r, list):
-                file_list.extend(r)
-
-    return file_list
-
-async def save_to_json(data: list[str], output_file: str):
+def extract_key_values(block_str):
     """
-    异步保存数据到 JSON 文件。
-
-    :param data: 要保存的数据（文件列表）
-    :param output_file: 输出 JSON 文件路径
+    给定一个块的字符串，比如：
+        "*LINE A=123 B=456 C=XX ;"
+    返回 "A=123 B=456 C=XX" 这样的字符串。
+    可以根据需要进行更复杂的处理。
     """
-    try:
-        async with aio_open(output_file, mode='w', encoding='utf-8') as f:
-            json_data = json.dumps(data, indent=4, ensure_ascii=False)
-            await f.write(json_data)
-        print(f"文件列表已保存到: {output_file}")
-    except Exception as e:
-        print(f"保存 JSON 文件时发生错误: {e}")
+    # 1) 去掉 *LINE
+    block_str = block_str.replace("*LINE", "")
+    # 2) 按分号拆分，取分号前内容
+    block_str = block_str.split(";")[0]
+    
+    # 去掉多余空白
+    block_str = block_str.strip()
+    
+    # 用正则找出所有 "X=Y" 形式的文本
+    pattern = r'(\w+\s*=\s*[^=\s]+)'
+    matches = re.findall(pattern, block_str)
+    
+    # 将提取到的部分用空格拼接
+    return " ".join(matches)
 
-async def main():
+def cma_to_excel(folder_path, output_excel="output.xlsx"):
     """
-    主异步任务：
-    1. 从用户处获取要遍历的目录和输出文件路径
-    2. 递归遍历文件
-    3. 保存结果到指定的 JSON 文件
+    遍历 folder_path 下所有 .cma 文件，
+    每当遇到 *LINE，解析 key=value 内容，
+    最后将结果写入 Excel。
     """
-    directory = input("请输入要遍历的目录路径: ").strip()
-    output_file = input("请输入输出 JSON 文件路径: ").strip()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "CMA数据"
 
-    print(f"开始遍历目录: {directory}\n")
-    file_list = await list_files_async(directory)
-    await save_to_json(file_list, output_file)
+    # 写表头（可根据需求更改）
+    ws.cell(row=1, column=1, value="文件名")
+    ws.cell(row=1, column=2, value="提取值")
+
+    current_row = 2
+
+    # 遍历文件
+    for root, _, files in os.walk(folder_path):
+        for f in files:
+            if f.lower().endswith(".cma"):
+                full_path = os.path.join(root, f)
+                blocks = parse_cma_file(full_path)
+                
+                # 对每个块进行key-value的提取
+                for block in blocks:
+                    kv_str = extract_key_values(block)
+                    
+                    # 写入Excel
+                    ws.cell(row=current_row, column=1, value=f)     # 文件名
+                    ws.cell(row=current_row, column=2, value=kv_str) # 提取的值
+                    current_row += 1
+    
+    wb.save(output_excel)
+    print(f"数据已写入 {output_excel} 文件。")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # 使用 Tkinter 打开文件夹选择对话框
+    root = tk.Tk()
+    root.withdraw()
+    
+    folder_to_search = filedialog.askdirectory(title='请选择要扫描的文件夹')
+    if folder_to_search:
+        output_file = "cma_data.xlsx"  # 也可以自己修改名字或用另一个对话框选择保存位置
+        cma_to_excel(folder_to_search, output_file)
+    else:
+        print("未选择任何文件夹。")
